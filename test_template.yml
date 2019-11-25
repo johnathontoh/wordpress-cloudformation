@@ -1,0 +1,324 @@
+---
+# The latest template format version is 2010-09-09 and is currently the only valid value.
+AWSTemplateFormatVersion: 2010-09-09
+
+Parameters:
+  InstanceTypeParameter:
+    Type: String
+    AllowedValues:
+      - t2.micro
+      - t2.small
+      - t2.medium
+      - t2.large
+    ConstraintDescription: must be a valid EC2 instance type.
+  # Using an existing keypair from AWS. Needs the public and private key pair for SSH purposes
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instance
+    Type: AWS::EC2::KeyPair::KeyName
+    ConstraintDescription: must be the name of an existing EC2 KeyPair.
+  # SSH access to the existing Amazon EC2 instance
+  SSHLocation:
+    Description: The IP address range that can be used to SSH to the EC2 instances
+    Type: String
+    MinLength: '9'
+    MaxLength: '18'
+    Default: 0.0.0.0/0
+    # ???
+    AllowedPattern: '(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})/(\\d{1,2})'
+    ConstraintDescription: must be a valid IP CIDR range of the form x.x.x.x/x.
+  
+  # Database details for wordpress (Can see when creating stack for wordpress under 'parameters')
+
+Mappings:
+  # Defining the instance type 2 architecture as 64 bit
+  # Optional?
+  AWSInstanceType2Arch:
+    t2.micro:
+      Arch: HVM64
+    t2.small:
+      Arch: HVM64
+    t2.medium:
+      Arch: HVM64
+    t2.large:
+      Arch: HVM64
+  # Defining the instance type 2 architecture for NAT (Network Address Translation?) as 64 bit
+  AWSInstanceType2NATArch:
+    t2.micro:
+      Arch: NATHVM64
+    t2.small:
+      Arch: NATHVM64
+    t2.medium:
+      Arch: NATHVM64
+    t2.large:
+      Arch: NATHVM64
+  RegionMap:
+    # Each top-level key is assigned a list with two second level keys, "HVM64" and "HVMG2", that correspond to the AMI's architecture.
+    # AMI for Singapore Region
+    ap-southeast-1:
+      # Amazon Machine Image (AMI) for platform/OS. In this case, Amazon Linux 2 AMI (HVM), SSD Volume Type
+      HVM64: ami-01f7527546b557442
+      # Amazon Machine Image (AMI) for graphics. In this case, Amazon Linux 2 Graphics AMI 2.0.20190612 x86_64 HVM gp2
+      HVMG2: ami-0eec32fe9d89bbd54
+
+
+Resources:
+  MyEC2Instance:
+    Type: 'AWS::EC2::Instance'
+    Properties:
+      # Reference to the "InstanceTypeParameter" to get information about the instance
+      InstanceType:
+        Ref: InstanceTypeParameter
+       # Reference to the "KeyName" to get information about the key
+      KeyName:
+        Ref: KeyName
+      # Reference to the "InstanceSecurityGroup" to get information about the security of the instance
+      SecurityGroups:
+        Ref: InstanceSecurityGroup
+  # A security group acts as a virtual firewall that controls the traffic for one or more instances.
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Enable HTTP access via port 80 locked down to the load balancer + SSH access'
+      # Security for traffic that is going towards the ssh port and internet port to the EC2 instance
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          # port 22 is the ssh port
+          FromPort: '22'
+          ToPort: '22'
+          # For allocation of IP and IP routing
+          CidrIp:
+            Ref: SSHLocation
+        - IpProtocol: tcp
+          # port 80 is the internet port
+          FromPort: '80'
+          ToPort: '80'
+          # For allocation of IP and IP routing
+          CidrIp:
+            Ref: SSHLocation
+
+  WebServer:
+    # Specifies an EC2 instance
+    Type: 'AWS::EC2::Instance'
+    # Some AWS CloudFormation features retrieve settings or configuration information that you define in the Metadata section.
+    Metadata: 
+      # Defines configuration tasks for the cfn-init helper script
+      # Use for configuring and installing applications on EC2 instances
+      AWS::CloudFormation::Init:
+        # A set of config keys, more than one configuration
+        # use "config" if only got 1 configuration
+        configSets:
+          # To install wordpress, it will first install cfn, then install wordpress and lastly, configure wordpress
+          InstallWordPress:
+            - 'install_cfn' # need to ask what is this for
+            - 'install_wordpress'
+            - 'configure_wordpress'
+        # Commands to run install_cfn
+        install_cfn:
+          # Create files on the EC2 instance
+          # "content" allows information to be written into the file
+          # Content can be either inline in the template or pulled from a URL.
+          files:
+            # Creates the cfn-hup.conf in the etc/cfn directory
+            /etc/cfn/cfn-hup.conf:
+              # Using the "Fn::Join" to appends set of values (stack name/ID and name of the AWS region containing the stack.) into a single value
+              content: !Join 
+                - ''
+                - - |
+                    [main]
+                  - stack=
+                  - !Ref 'AWS::StackId'
+                  - |+
+
+                  - region=
+                  - !Ref 'AWS::Region'
+                  - |+
+
+              # change the permission of the file to "004" and giving the owning group and owning user root access
+              mode: '000400'
+              owner: root
+              group: root
+        
+             # creates the cfn-auto-reloader.conf in the /etc/cfn/hooks.d directory
+             # can place one or more additional hooks configuration files in the hooks.d directory
+             # to support composition of several applications deploying change notification hooks
+             # user actions that the cfn-hup daemon calls periodically are defined in the hooks.conf configuration file 
+            /etc/cfn/hooks.d/cfn-auto-reloader.conf:
+              # Using the "Fn::Join" to appends set of values (?????????) into a single value
+              content: !Join 
+                - ''
+                - - |
+                    # hook name
+                    [cfn-auto-reloader-hook]
+                  - |
+                    # whenever an update is made, it will trigger the action
+                    triggers=post.update
+                  - |
+                    # path to the metadata object. Under "resources" --> "webserver" --> "metadata" --> "AWS::CloudFormation::Init"
+                    path=Resources.WebServer.Metadata.AWS::CloudFormation::Init
+                    # shell command to run
+                    # Need to ask what does this action do
+                  - 'action=/opt/aws/bin/cfn-init -v '
+                  - '         --stack '
+                  - !Ref 'AWS::StackName'
+                  - '         --resource WebServer '
+                  - '         --configsets wordpress_install '
+                  - '         --region '
+                  - !Ref 'AWS::Region'
+                  - |+
+
+              # change the permission of the file to "004" and giving the owning group and owning user root access
+              mode: '000400'
+              owner: root
+              group: root
+          # define which services should be enabled or disabled when the instance is launched
+          # On Linux systems, this key is supported by using sysvinit. On Windows systems, it is supported by using the Windows service manager.
+          services:
+            sysvinit:
+              # The cfn-hup helper is a daemon that detects changes in resource metadata and runs user-specified actions when a change is detected
+              # hooks configuration file is loaded at cfn-hup daemon startup only, so new hooks will require the daemon to be restarted
+              cfn-hup:
+                # Set to true to ensure that the service will be started automatically upon boot.
+                enabled: 'true'
+                # Set to true to ensure that the service is running after cfn-init finishes.
+                ensureRunning: 'true'
+                # if there is a change within these 2 files, the service will be restarted
+                files:
+                  - /etc/cfn/cfn-hup.conf
+                  - /etc/cfn/hooks.d/cfn-auto-reloader.conf
+              # might need to add php packages to update php and restart the service?
+              # https://blog.layershift.com/which-php-mode-apache-vs-cgi-vs-fastcgi/
+              # php-fastcgi ???
+        
+        # Commands to run  install_wordpress
+        install_wordpress:
+          packages:
+            yum:
+              # specify the php version
+              php: ["7.0"]
+              php-mysql: []
+              mysql: []
+              mysql-server: []
+              mysql-devel: []
+              mysql-libs: []
+              httpd: []
+          sources:
+            # download the wordpress package into the html directory
+            /var/www/html: 'http://wordpress.org/latest.tar.gz'
+          files:
+            # create the setup.mysql file
+            # put in the database content into the file
+            /tmp/setup.mysql:
+              content: !Join 
+                - ''
+                - - 'CREATE DATABASE '
+                  - !Ref DBName
+                  - |
+                    ;
+                  - CREATE USER '
+                  - !Ref DBUser
+                  - '''@''localhost'' IDENTIFIED BY '''
+                  - !Ref DBPassword
+                  - |
+                    ';
+                  - 'GRANT ALL ON '
+                  - !Ref DBName
+                  - .* TO '
+                  - !Ref DBUser
+                  - |
+                    '@'localhost';
+                  - |
+                    FLUSH PRIVILEGES;
+              mode: '000400'
+              owner: root
+              group: root
+            # create the create-wp-config file
+            # put in the wordpress configuration into the file and make it executable
+            /tmp/create-wp-config:
+              content: !Join 
+                - ''
+                - - |
+                    #!/bin/bash -xe
+                  - >
+                    cp /var/www/html/wordpress/wp-config-sample.php
+                    /var/www/html/wordpress/wp-config.php
+                  - sed -i "s/'database_name_here'/'
+                  - !Ref DBName
+                  - |
+                    '/g" wp-config.php
+                  - sed -i "s/'username_here'/'
+                  - !Ref DBUser
+                  - |
+                    '/g" wp-config.php
+                  - sed -i "s/'password_here'/'
+                  - !Ref DBPassword
+                  - |
+                    '/g" wp-config.php
+              mode: '000500'
+              owner: root
+              group: root
+          services:
+            sysvinit:
+              # need to specify source or package???
+              # the httpd will be restarted when changes is made to it
+              httpd:
+                enabled: 'true'
+                ensureRunning: 'true'
+              # the mysqld will be restarted when changes is made to it
+              mysqld:
+                enabled: 'true'
+                ensureRunning: 'true'
+        
+        # Commands to run configure_wordpress
+        configure_wordpress:
+          # execute commands on the EC2 instance
+          commands:
+            # name of the command
+            01_set_mysql_root_password:
+              # specifying the command to run
+              command: !Join 
+                - ''
+                - - mysqladmin -u root password '
+                  - !Ref DBRootPassword
+                  - ''''
+              test: !Join 
+                - ''
+                - - '$(mysql '
+                  - !Ref DBName
+                  - ' -u root --password='''
+                  - !Ref DBRootPassword
+                  - ''' >/dev/null 2>&1 </dev/null); (( $? != 0 ))'
+            02_create_database:
+              command: !Join 
+                - ''
+                - - mysql -u root --password='
+                  - !Ref DBRootPassword
+                  - ''' < /tmp/setup.mysql'
+              test: !Join 
+                - ''
+                - - '$(mysql '
+                  - !Ref DBName
+                  - ' -u root --password='''
+                  - !Ref DBRootPassword
+                  - ''' >/dev/null 2>&1 </dev/null); (( $? != 0 ))'
+            03_configure_wordpress:
+              command: /tmp/create-wp-config
+              cwd: /var/www/html/wordpress
+          #packages: 
+            
+          #groups: 
+            
+          #users: 
+            
+          #sources: 
+            
+          #files: 
+            
+          #commands: 
+            
+          #services: 
+
+
+
+
+
+Outputs:
